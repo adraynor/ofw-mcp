@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createTestHarness, parseToolResult } from '@chrischall/mcp-utils/test';
+import { EdgeBlockedError } from '@chrischall/mcp-utils';
 import { OFWClient } from '../src/client.js';
 import { registerHealthcheckTools } from '../src/tools/healthcheck.js';
 
@@ -129,5 +130,184 @@ describe('a CloudFront block reads as edge_blocked, not a credential problem', (
 
     expect(r.ok).toBe(false);
     expect(r.error?.kind).not.toBe('edge_blocked');
+  });
+});
+
+/**
+ * The tools, not just the healthcheck: every OFW read and write rides
+ * `OFWClient.request`/`requestBinary`, which turned a block page into a
+ * generic `OFW API error: 403 Forbidden … <HTML…>` — no `EdgeBlockedError`
+ * for a caller to branch on, and the page dumped into the message
+ * (chrischall/mcp-host#1015).
+ */
+describe('a block on a tool request throws EdgeBlockedError', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  const logins = (): number =>
+    fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/ofw/login')).length;
+  const apiCalls = (): number =>
+    fetchMock.mock.calls.filter(([u]) => String(u).includes('/pub/')).length;
+
+  // Cloudflare's managed challenge, as served on a mitigated API request.
+  function challenged(status: number): Response {
+    return new Response(
+      '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>' +
+        '<noscript>Enable JavaScript and cookies to continue</noscript>' +
+        '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script></body></html>',
+      { status, headers: { 'content-type': 'text/html; charset=UTF-8', 'cf-mitigated': 'challenge', server: 'cloudflare' } },
+    );
+  }
+
+  /** The same challenge page with no `cf-mitigated` header: provable only from the body. */
+  function challengedBodyOnly(status: number): Response {
+    return new Response(
+      '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>' +
+        '<noscript>Enable JavaScript and cookies to continue</noscript>' +
+        '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script></body></html>',
+      { status, headers: { 'content-type': 'text/html; charset=UTF-8', server: 'cloudflare' } },
+    );
+  }
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    process.env.OFW_USERNAME = 'parent@example.com';
+    process.env.OFW_PASSWORD = 'pw';
+    process.env.OFW_DISABLE_FETCHPROXY = '1';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    delete process.env.OFW_USERNAME;
+    delete process.env.OFW_PASSWORD;
+    delete process.env.OFW_DISABLE_FETCHPROXY;
+  });
+
+  it('a CloudFront 403 on a JSON request', async () => {
+    fetchMock.mockImplementation(ofw(blocked));
+
+    const err = await new OFWClient().request('GET', '/pub/v3/messages').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect((err as EdgeBlockedError).vendor).toBe('CloudFront');
+    expect((err as EdgeBlockedError).status).toBe(403);
+    expect((err as Error).message).toMatch(/GET \/pub\/v3\/messages/);
+    // The page is HTML noise; the classification already said what it was.
+    expect((err as Error).message).not.toMatch(/<HTML|could not be satisfied/i);
+  });
+
+  it('a CloudFront 403 on a binary download', async () => {
+    fetchMock.mockImplementation(ofw(blocked));
+
+    const err = await new OFWClient().requestBinary('GET', '/pub/v1/files/9').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+  });
+
+  it('a 401 challenge spends no re-login: the stored token is kept', async () => {
+    fetchMock.mockImplementation(ofw(() => challenged(401)));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect((err as EdgeBlockedError).vendor).toBe('Cloudflare');
+    // One sign-in to mint the token, none to "recover" from the block.
+    expect(logins()).toBe(1);
+    expect(apiCalls()).toBe(1);
+  });
+
+  it('a 429 challenge is not waited out and replayed as a rate limit', async () => {
+    fetchMock.mockImplementation(ofw(() => challenged(429)));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect(apiCalls()).toBe(1);
+  });
+
+  it('a 429 challenge provable only from its body is not replayed as a rate limit', async () => {
+    // No `cf-mitigated` header: only the page itself says Cloudflare refused it.
+    fetchMock.mockImplementation(ofw(() => challengedBodyOnly(429)));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect((err as EdgeBlockedError).vendor).toBe('Cloudflare');
+    expect((err as EdgeBlockedError).status).toBe(429);
+    expect(apiCalls()).toBe(1);
+  });
+
+  it('a genuine 429 that turns into a body-only block on the replay is reported as the block', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      fetchMock.mockImplementation(
+        ofw(() => (n++ === 0 ? json(429, { message: 'Too many requests' }) : challengedBodyOnly(429))),
+      );
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(2000);
+      const err = await pending;
+
+      expect(err).toBeInstanceOf(EdgeBlockedError);
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: a genuine 429 still retries once, then reports a rate limit', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(ofw(() => json(429, { message: 'Too many requests' })));
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(2000);
+      const err = await pending;
+
+      expect(err).not.toBeInstanceOf(EdgeBlockedError);
+      expect((err as Error).message).toBe('Rate limited by OFW API');
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: an empty-bodied 429 still retries once, then succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      fetchMock.mockImplementation(
+        ofw(() => (n++ === 0 ? new Response(null, { status: 429 }) : json(200, { ok: true }))),
+      );
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      await expect(pending).resolves.toEqual({ ok: true });
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("control: the API's own JSON 403 stays an OFW API error", async () => {
+    fetchMock.mockImplementation(ofw(() => json(403, { message: 'Access is denied' })));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(EdgeBlockedError);
+    expect((err as Error).message).toMatch(/^OFW API error: 403 .*Access is denied/);
+  });
+
+  it("control: the API's own JSON 401 still re-logs in once", async () => {
+    fetchMock.mockImplementation(ofw(() => json(401, { message: 'Unauthorized' })));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).not.toBeInstanceOf(EdgeBlockedError);
+    expect((err as Error).message).toMatch(/^OFW API error: 401/);
+    expect(logins()).toBe(2);
   });
 });

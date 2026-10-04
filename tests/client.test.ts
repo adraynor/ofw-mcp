@@ -476,6 +476,16 @@ describe('OFWClient', () => {
       expect(signal.aborted).toBe(false);
     });
 
+    it('rejects an already-aborted caller without starting fetch', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const caller = new AbortController();
+      const reason = new Error('caller already left');
+      caller.abort(reason);
+      await expect(withCallSignal(caller.signal, () => injectedClient().request('GET', '/pub/v1/stalled'))).rejects.toBe(reason);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
     it('preserves ambient cancellation during body reads without diagnosing a timeout', async () => {
       vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
         stalledResponse(init!.signal!, 200, 'application/json').response);

@@ -284,7 +284,8 @@ export class OFWClient {
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const startedAt = Date.now();
 
-    const signal = withAmbientCancellation(ac.signal) ?? ac.signal;
+    // Passing our own signal guarantees a signal even without an ambient caller.
+    const signal = withAmbientCancellation(ac.signal)!;
     let onAbort!: () => void;
     // Race the complete attempt, not just fetch: body.cancel() may not settle
     // on abort, and edge-probe/release helpers deliberately swallow I/O errors.

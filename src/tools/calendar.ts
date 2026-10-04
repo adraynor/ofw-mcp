@@ -282,11 +282,30 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       });
       if (gate) return gate;
     }
-    await client.request('PUT', `/pub/v3/events/${id}`, payload);
+    try {
+      await requestWrite(client, 'PUT', `/pub/v3/events/${id}`, payload);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'EVENT_UNCONFIRMED',
+        what: `update event ${eventId}`,
+        checkWith: 'ofw_list_events for this event and date range',
+      });
+    }
     // PUT responses aren't documented — re-fetch the detail as authoritative state.
-    const rawAfter = await client.request('GET', `/pub/v3/events/${id}`);
-    const event = parseLenient(eventDetailSchema, rawAfter, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId} (post-update)`, mode: 'strict' });
-    return jsonResponse({ note: 'Event updated; returning re-fetched event state.', event });
+    // Once PUT succeeded, even a definitive rejection of this GET is not a
+    // rejection of the write. Do not present a failed verification as a safe retry.
+    try {
+      const rawAfter = await client.request('GET', `/pub/v3/events/${id}`);
+      const event = parseLenient(eventDetailSchema, rawAfter, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId} (post-update)`, mode: 'strict' });
+      return jsonResponse({ note: 'Event updated; returning re-fetched event state.', event });
+    } catch (e) {
+      return unconfirmedWriteResponse(new UnconfirmedWriteError(null, e), {
+        result: 'EVENT_UNCONFIRMED',
+        what: `verify the update to event ${eventId}`,
+        checkWith: 'ofw_list_events for this event and date range',
+      });
+    }
   });
 
   if (allowWrites) server.registerTool('ofw_delete_event', {
@@ -323,7 +342,16 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       });
       if (gate) return gate;
     }
-    await client.request('DELETE', `/pub/v3/events/${id}?includeFuture=${includeFuture}`);
+    try {
+      await requestWrite(client, 'DELETE', `/pub/v3/events/${id}?includeFuture=${includeFuture}`);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'EVENT_UNCONFIRMED',
+        what: `delete event ${args.eventId}${includeFuture ? ' and its future occurrences' : ''}`,
+        checkWith: 'ofw_list_events for this event and date range (including future occurrences if requested)',
+      });
+    }
     return textResponse(`Event ${args.eventId} ("${current.title}") deleted`);
   });
 }

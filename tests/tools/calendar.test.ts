@@ -340,13 +340,13 @@ describe('ofw_update_event', () => {
 });
 
 describe('ofw_delete_event', () => {
-  it('reports an ambiguous DELETE as EVENT_UNCONFIRMED without replaying it', async () => {
+  it.each([false, true])('reports an ambiguous DELETE as EVENT_UNCONFIRMED without replaying it (includeFuture=%s)', async (includeFuture) => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(EVENT_DETAIL)
       .mockRejectedValueOnce(new Error('socket hang up'));
     setup(client);
-    const result = await handlers.get('ofw_delete_event')!({ eventId: '128246904' });
+    const result = await handlers.get('ofw_delete_event')!({ eventId: '128246904', includeFuture });
     expect(result.isError).toBe(true);
     const body = JSON.parse(result.content[0].text);
     expect(body.result).toBe('EVENT_UNCONFIRMED');

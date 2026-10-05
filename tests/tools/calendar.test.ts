@@ -520,6 +520,9 @@ describe('calendar writes — confirmation gate (SEC-2)', () => {
     for (const name of ['ofw_create_event', 'ofw_update_event', 'ofw_delete_event']) {
       expect(configs.get(name)!.inputSchema!.shape).toHaveProperty('confirmToken');
       expect(configs.get(name)!.description).toMatch(/MCP_CONFIRM_MODE/);
+      // Every write can come back EVENT_UNCONFIRMED; a caller that only reads
+      // the description must learn not to retry one blindly.
+      expect(configs.get(name)!.description).toMatch(/EVENT_UNCONFIRMED[^.]*do NOT retry/);
     }
     expect(configs.get('ofw_create_event')!.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true });
   });

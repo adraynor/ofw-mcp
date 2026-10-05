@@ -231,7 +231,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   });
 
   if (allowWrites) server.registerTool('ofw_update_event', {
-    description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. ' + CONFIRM_NOTE,
+    description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. If the write fails without a definitive answer, or lands but cannot be re-read to confirm it, the result is EVENT_UNCONFIRMED: the change may already be on OFW, so do NOT retry until ofw_list_events shows whether it landed. ' + CONFIRM_NOTE,
     annotations: { destructiveHint: true },
     inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
@@ -309,7 +309,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   });
 
   if (allowWrites) server.registerTool('ofw_delete_event', {
-    description: 'Delete an OurFamilyWizard calendar event. Reads the event first; deleting one the co-parent can see is confirmed first, with a preview of exactly which event (title, date, time) is removed, and is refused if the event changed on OFW after that preview. ' + CONFIRM_NOTE,
+    description: 'Delete an OurFamilyWizard calendar event. Reads the event first; deleting one the co-parent can see is confirmed first, with a preview of exactly which event (title, date, time) is removed, and is refused if the event changed on OFW after that preview. If the request fails without a definitive answer the result is EVENT_UNCONFIRMED: the event may already be gone, so do NOT retry until ofw_list_events shows whether it is still there. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),

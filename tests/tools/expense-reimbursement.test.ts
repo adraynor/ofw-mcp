@@ -169,6 +169,37 @@ describe(name, () => {
     expect(body(await handler(args, NO_ELICIT_CTX))).toMatchObject({ reason: 'confirmation-unsupported' });
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it.each(['title', 'fileId'] as const)('rejects accepted elicitation after %s changes with unchanged args', async (field) => {
+    const { handler, request } = setup();
+    const prompt = await handler(args, CAN_ASK_CTX) as unknown as { resultType: string; requestState: string };
+    expect(prompt.resultType).toBe('input_required');
+    expect(prompt.requestState).toEqual(expect.any(String));
+    expect(request.mock.calls).toEqual([['GET', path]]);
+    const changed = { ...expense(), [field]: field === 'title' ? 'Changed synthetic title' : 85002 };
+    request.mockResolvedValue(changed);
+    request.mockClear();
+    const result = await handler(args, {
+      mcpReq: { ...CAN_ASK_CTX.mcpReq, requestState: () => prompt.requestState,
+        inputResponses: { confirmation: { action: 'accept', content: { confirmed: true } } } },
+    });
+    expect(request.mock.calls.filter((c) => c[0] === 'PUT')).toHaveLength(0);
+    expect(result.resultType).toBe('input_required');
+    expect(request.mock.calls).toEqual([['GET', path]]);
+  });
+  it('accepts unchanged elicitation state and performs exactly one verified status PUT', async () => {
+    const { handler, request } = setup();
+    const prompt = await handler(args, CAN_ASK_CTX) as unknown as { requestState: string };
+    expect(prompt.requestState).toEqual(expect.any(String));
+    request.mockClear();
+    request.mockResolvedValueOnce(expense()).mockResolvedValueOnce(expense()).mockResolvedValueOnce(null).mockResolvedValueOnce(paid());
+    const result = await handler(args, {
+      mcpReq: { ...CAN_ASK_CTX.mcpReq, requestState: () => prompt.requestState,
+        inputResponses: { confirmation: { action: 'accept', content: { confirmed: true } } } },
+    });
+    expect(body(result)).toMatchObject({ result: 'EXPENSE_MARKED_REIMBURSED', verified: true });
+    expect(request.mock.calls).toEqual([['GET', path], ['GET', path],
+      ['PUT', `${path}/status`, { status: 'MARKED_REIMBURSED' }], ['GET', path]]);
+  });
   it('asks capable clients rather than writing', async () => {
     const { handler, request } = setup();
     expect((await handler(args, CAN_ASK_CTX)).resultType).toBe('input_required');
